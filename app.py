@@ -6,6 +6,8 @@ from io import BytesIO
 from datetime import datetime
 import re
 import altair as alt
+import base64
+import concurrent.futures
 
 # === Basic Page Configuration ===
 st.set_page_config(page_title="ezinụlọ PriceFinder", layout="centered")
@@ -14,236 +16,127 @@ st.set_page_config(page_title="ezinụlọ PriceFinder", layout="centered")
 def local_css(css_text):
     st.markdown(f"<style>{css_text}</style>", unsafe_allow_html=True)
 
-default_css = """
-/* Grundlegendes Styling */
-body { background-color: #f7f7f7; color: #1f3c60; }
-.block-container { padding-top: 2rem; padding-bottom: 2rem; }
+# === Ergebnisanzeige Schritt 4 ===
+st.markdown("""<hr style='margin-top: 2rem; margin-bottom: 1rem;'>""", unsafe_allow_html=True)
+st.markdown("### 📊 Schritt 4: Ergebnisse anzeigen & exportieren")
 
-/* Responsives Layout */
-@media only screen and (max-width: 768px) {
-    .logo { width: 150px; }
-}
+uploaded_file = st.file_uploader("Wähle deine Datei mit EANs", type=["csv", "xlsx"])
 
-/* Custom Progress Bar mit Leaf-Icon als Zeiger */
-.progress-container {
-    position: relative;
-    height: 25px;
-    background-color: #ddd;
-    border-radius: 12px;
-    overflow: hidden;
-    margin-bottom: 1rem;
-}
-.progress-bar {
-    height: 100%;
-    background-color: #6eb344;
-    text-align: center;
-    line-height: 25px;
-    color: white;
-    transition: width 0.3s ease;
-}
-/* Der "Zeiger": Wir nutzen hier das Logo (das Blatt wird extrahiert – hier simuliert) */
-.progress-pointer {
-    position: absolute;
-    top: -10px;
-    width: 40px;
-    height: 40px;
-    background-image: url("ezinulo_Logo.jpg");
-    background-size: contain;
-    background-repeat: no-repeat;
-    transition: left 0.3s ease;
-}
-.footer {
-    margin-top: 2rem;
-    text-align: center;
-    font-size: 0.8em;
-    color: #888;
-}
-"""
-
-dark_css = """
-body { background-color: #1f1f1f; color: #f7f7f7; }
-.block-container { padding-top: 2rem; padding-bottom: 2rem; }
-.progress-container { background-color: #444; }
-.progress-bar { background-color: #6eb344; }
-.footer { color: #aaa; }
-"""
-
-# Standard CSS anwenden
-local_css(default_css)
-
-# === Dark Mode Toggle ===
-dark_mode = st.checkbox("Dark Mode aktivieren")
-if dark_mode:
-    local_css(dark_css)
-
-# === Logo und Titel ===
-st.image("ezinulo_Logo.jpg", use_column_width=False, output_format="auto", caption="ezinụlọ")
-st.markdown("<h2 style='color:#1f3c60;'>ezinụlọ PriceFinder</h2>", unsafe_allow_html=True)
-st.write("🚀 Lade eine EAN-Liste hoch und erhalte automatisch den besten Preis auf Google Shopping und Idealo.")
-
-# === Mini-Infoboxen mit Tipps ===
-st.info("Tipp: Lade eine Datei mit einer Spalte namens **EAN** hoch. Unterstützt werden .csv und .xlsx.")
-
-# === File Upload ===
-uploaded_file = st.file_uploader("📤 EAN-Datei hochladen (.csv oder .xlsx)", type=["csv", "xlsx"])
-
-# === Smart-Filter: Obergrenze für Preise (in Euro) ===
-price_filter = st.number_input("Maximalpreis (in Euro, 0 = kein Filter):", min_value=0.0, step=0.1, value=0.0)
-
-# === Funktionen: Preise holen ===
-
-def fetch_google_price(ean):
+def scrape_google_price(query):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    url = f"https://www.google.com/search?tbm=shop&q={query}"
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        url = f"https://www.google.com/search?tbm=shop&q={ean}"
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        result = soup.select_one('div.sh-dgr__grid-result')
-
-        if result:
-            price_elem = result.select_one('span.T14wmb')
-            link_elem = result.select_one('a.shntl')
-
-            price = price_elem.text.strip() if price_elem else "Not Found"
-            link = "https://www.google.com" + link_elem["href"] if link_elem else "N/A"
-            return price, link
-    except Exception as e:
-        return "Error", "N/A"
-    return "Not Found", "N/A"
-
-def fetch_idealo_price(ean):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        url = f"https://www.idealo.de/preisvergleich/MainSearchProductCategory.html?q={ean}"
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(response.text, "html.parser")
-        result = soup.select_one("div.offerList-item")
-
-        if result:
-            price_elem = result.select_one(".price")
-            link_elem = result.select_one("a")
-
-            price = price_elem.text.strip() if price_elem else "Not Found"
-            link = "https://www.idealo.de" + link_elem["href"] if link_elem else "N/A"
-            return price, link
-    except Exception as e:
-        return "Error", "N/A"
-    return "Not Found", "N/A"
-
-# Funktion zum Extrahieren numerischer Werte aus Preis-Strings
-def parse_price(price_str):
-    # Beispiel: "€ 12,34" oder "12,34 €" → 12.34
-    try:
-        match = re.search(r"(\d+[\.,]?\d*)", price_str.replace(" ", ""))
-        if match:
-            value = match.group(1).replace(",", ".")
-            return float(value)
+        price = soup.select_one("span.a8Pemb")
+        return price.text.strip() if price else None
     except Exception:
         return None
-    return None
 
-# === Verarbeitung & Fortschrittsanzeige ===
-if uploaded_file:
-    # Laden der Datei
-    if uploaded_file.name.endswith(".csv"):
-        df = pd.read_csv(uploaded_file)
+def scrape_idealo_price(query):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    url = f"https://www.idealo.de/preisvergleich/MainSearchProductCategory.html?q={query}"
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(response.text, "html.parser")
+        price = soup.select_one("div.offerList-price span")
+        return price.text.strip() if price else None
+    except Exception:
+        return None
+
+def fallback_price_scraper(ean, name):
+    google = scrape_google_price(ean) or scrape_google_price(name)
+    idealo = scrape_idealo_price(ean) or scrape_idealo_price(name)
+    return google, idealo
+
+def recommend_prices(g_price, i_price):
+    try:
+        g = float(re.sub(r"[^\d.]", "", g_price)) if g_price else None
+        i = float(re.sub(r"[^\d.]", "", i_price)) if i_price else None
+        prices = [p for p in [g, i] if p is not None]
+        avg = sum(prices) / len(prices) if prices else 0
+        uvp = round(avg * 1.3, 2)
+        b2b = round(avg / 1.8, 2) if avg else 0
+        faktor = 1.3
+        marge = round(((uvp - avg) / uvp) * 100, 2) if uvp else 0
+        return uvp, b2b, faktor, marge
+    except:
+        return 0, 0, 0, 0
+
+def calculate_margin_vs_ek(preis, ek):
+    try:
+        if preis and ek and ek > 0:
+            return round(((preis - ek) / preis) * 100, 2)
+        else:
+            return 0
+    except:
+        return 0
+
+def style_marge(m):
+    if m >= 30:
+        return f'<span style="color:green;font-weight:bold;">{m}%</span>'
+    elif m >= 15:
+        return f'<span style="color:orange;font-weight:bold;">{m}%</span>'
     else:
-        df = pd.read_excel(uploaded_file)
+        return f'<span style="color:red;font-weight:bold;">{m}%</span>'
 
-    df['EAN'] = df['EAN'].astype(str)
-    results = []
-    total = len(df)
-    
-    st.write("### Preisvergleich läuft...")
-    progress_bar = st.progress(0)
-    progress_container = st.empty()  # Für custom Progress-Balken
+if uploaded_file:
+    try:
+        if uploaded_file.name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
 
-    # Für Fortschrittsanzeige mit Pointer: Container für HTML
-    progress_html = """
-    <div class="progress-container" id="progress-container">
-        <div class="progress-bar" id="progress-bar" style="width:0%;">0%</div>
-        <div class="progress-pointer" id="progress-pointer" style="left:0%;"></div>
-    </div>
-    """
-    st.markdown(progress_html, unsafe_allow_html=True)
+        if "EAN" not in df.columns or "EK" not in df.columns or "Name" not in df.columns:
+            st.error("Die Datei muss die Spalten 'EAN', 'Name' und 'EK' enthalten.")
+        else:
+            df_result = df.copy()
 
-    for idx, ean in enumerate(df['EAN'], start=1):
-        st.write(f"Verarbeite EAN {idx} von {total}: {ean}")
-        google_price, google_link = fetch_google_price(ean)
-        idealo_price, idealo_link = fetch_idealo_price(ean)
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-        results.append({
-            "EAN": ean,
-            "Google Preis": google_price,
-            "Google Link": google_link,
-            "Idealo Preis": idealo_price,
-            "Idealo Link": idealo_link
-        })
-        # Update progress: prozentualer Fortschritt
-        progress = int((idx / total) * 100)
-        progress_bar.progress(progress)
-        # Update custom progress bar via JavaScript injection (simuliert via st.markdown)
-        custom_progress = f"""
-        <script>
-            var progressBar = window.parent.document.getElementById("progress-bar");
-            var progressPointer = window.parent.document.getElementById("progress-pointer");
-            if(progressBar) {{
-                progressBar.style.width = "{progress}%";
-                progressBar.innerHTML = "{progress}%";
-            }}
-            if(progressPointer) {{
-                progressPointer.style.left = "{progress}%";
-            }}
-        </script>
-        """
-        st.markdown(custom_progress, unsafe_allow_html=True)
+            google_results = {}
+            idealo_results = {}
 
-    result_df = pd.DataFrame(results)
-    
-    # Smart-Filter anwenden: Nur Zeilen, bei denen mindestens ein Preis unter dem Limit liegt (sofern gesetzt)
-    if price_filter > 0:
-        def filter_price(row):
-            # Versuche beide Preise zu parsen und vergleiche
-            gp = parse_price(str(row["Google Preis"]))
-            ip = parse_price(str(row["Idealo Preis"]))
-            prices = [p for p in [gp, ip] if p is not None]
-            return any(p < price_filter for p in prices) if prices else False
-        result_df = result_df[result_df.apply(filter_price, axis=1)]
-    
-    st.success("✅ Preise erfolgreich ermittelt!")
-    st.dataframe(result_df)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                future_to_row = {
+                    executor.submit(fallback_price_scraper, row["EAN"], row["Name"]): idx
+                    for idx, row in df_result.iterrows()
+                }
 
-    # === Download Buttons für Excel und CSV ===
-    buffer_excel = BytesIO()
-    result_df.to_excel(buffer_excel, index=False)
-    buffer_excel.seek(0)
-    
-    buffer_csv = result_df.to_csv(index=False).encode('utf-8')
-    
-    st.download_button(
-        label="📥 Ergebnis als Excel herunterladen",
-        data=buffer_excel,
-        file_name=f"preisvergleich_{datetime.today().date()}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-    st.download_button(
-        label="📥 Ergebnis als CSV herunterladen",
-        data=buffer_csv,
-        file_name=f"preisvergleich_{datetime.today().date()}.csv",
-        mime="text/csv"
-    )
-    
-    # === Chart: Histogramm der Google Preise (numerisch) ===
-    # Extrahiere Preise, falls parsebar
-    google_prices = result_df["Google Preis"].apply(lambda x: parse_price(str(x)))
-    chart_data = pd.DataFrame({"Google Preise": google_prices.dropna()})
-    if not chart_data.empty:
-        st.write("### Preisverteilung (Google)")
-        chart = alt.Chart(chart_data).mark_bar().encode(
-            x=alt.X("Google Preise:Q", bin=alt.Bin(maxbins=20), title="Preis in Euro"),
-            y=alt.Y("count()", title="Anzahl Produkte")
-        ).properties(width=600, height=300)
-        st.altair_chart(chart, use_container_width=True)
+                for i, future in enumerate(concurrent.futures.as_completed(future_to_row)):
+                    idx = future_to_row[future]
+                    g_price, i_price = future.result()
+                    google_results[df_result.at[idx, "EAN"]] = g_price
+                    idealo_results[df_result.at[idx, "EAN"]] = i_price
+                    progress_bar.progress((i + 1) / len(df_result))
+                    status_text.text(f"{i+1}/{len(df_result)} verarbeitet...")
 
-# === Footer ===
-st.markdown("<div class='footer'>Powered by ezinụlọ 🌿</div>", unsafe_allow_html=True)
+            df_result["Google Preis"] = df_result["EAN"].map(google_results)
+            df_result["Idealo Preis"] = df_result["EAN"].map(idealo_results)
+
+            df_result["UVP"], df_result["B2B"], df_result["Multiplikator"], df_result["Marge"] = zip(*df_result.apply(lambda row: recommend_prices(row["Google Preis"], row["Idealo Preis"]), axis=1))
+            df_result["Marge"] = df_result["Marge"].astype(float)
+
+            df_result["Marge vs EK"] = df_result.apply(lambda row: calculate_margin_vs_ek(row["UVP"], row["EK"]), axis=1)
+
+            marge_filter = st.slider("🔎 Nur Produkte mit Mindestmarge anzeigen", 0, 100, 0)
+            filtered = df_result[df_result["Marge"] >= marge_filter].reset_index(drop=True)
+
+            styled = filtered.copy()
+            styled["Marge"] = styled["Marge"].apply(lambda x: style_marge(x), convert_dtype=False)
+            styled["Marge vs EK"] = styled["Marge vs EK"].apply(lambda x: style_marge(x), convert_dtype=False)
+            st.markdown(styled.to_html(escape=False, index=False), unsafe_allow_html=True)
+
+            chart = alt.Chart(filtered).mark_bar().encode(
+                alt.X("Marge", bin=True),
+                y='count()'
+            ).properties(title="📈 Margenverteilung")
+            st.altair_chart(chart, use_container_width=True)
+
+            st.markdown("#### 📥 Exportiere die Ergebnisse")
+            csv = filtered.to_csv(index=False).encode("utf-8")
+            st.download_button("💾 CSV herunterladen", csv, "preisfinder_ergebnisse.csv", "text/csv", key='download-csv')
+
+    except Exception as e:
+        st.error(f"Fehler beim Verarbeiten der Datei: {e}")
