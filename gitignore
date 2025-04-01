@@ -1,7 +1,14 @@
+# Streamlit secrets (niemals ins Repository laden)
+.streamlit/secrets.toml
 
+# Python
 __pycache__/
 *.py[cod]
-*.DS_Store
+
+# Jupyter & System
+.ipynb_checkpoints/
+.DS_Store
+
+# VSCode & Umgebung
+.vscode/
 .env
-*.xlsx
-*.csv
